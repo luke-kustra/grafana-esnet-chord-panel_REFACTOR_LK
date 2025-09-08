@@ -24,6 +24,8 @@ Text Length: The amount of space alloted for labels on the outside of the diagra
 ### Standard
 Units: Set the units for the values in the Standard Options section.
 
+
+
 *** Copyright Notice ***
 
 Grafana Plugin: Chord Diagram (esnet-chord-diagram) Copyright (c) 2022,
