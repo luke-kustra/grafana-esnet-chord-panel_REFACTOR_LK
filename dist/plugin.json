@@ -4,7 +4,7 @@
   "name": "ESnet Chord",
   "id": "esnet-chord-panel",
   "info": {
-    "description": "ESnet Chord Panel Plugin for Grafana 8.3 and newer",
+    "description": "ESnet Chord Panel Plugin for Grafana 10.4 and newer",
     "author": {
       "name": "ESnet",
       "url": "https://www.es.net/"
@@ -28,11 +28,11 @@
         "name": "chord-example",
         "path": "img/Chord-Example.png"
       }],
-    "version": "1.0.5",
-    "updated": "2024-03-15"
+    "version": "2.0.0",
+    "updated": "2026-07-01"
   },
   "dependencies": {
-    "grafanaDependency": ">=8.3.0",
+    "grafanaDependency": ">=10.4.0",
     "plugins": []
   }
 }

@@ -1,5 +1,13 @@
+# REFACTOR (2026-07): dist/ is now ignored (build output should not be
+# committed), and package-lock.json is now COMMITTED (the project moved from
+# yarn to npm, and lockfiles should be checked in for reproducible builds).
 .DS_Store
-# dist
-node_modules
-coverage
-package-lock.json
+dist/
+node_modules/
+coverage/
+.eslintcache
+*.swp
+# Playwright e2e artifacts
+test-results/
+playwright-report/
+playwright/.auth/

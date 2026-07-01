@@ -1,9 +1,32 @@
 {
-  "extends": "./node_modules/@grafana/toolkit/src/config/tsconfig.plugin.json",
-  "include": ["src", "types"],
+  // REFACTOR (2026-07): Previously extended a tsconfig buried inside the
+  // deprecated @grafana/toolkit package. The options are now declared
+  // explicitly (matching the @grafana/create-plugin defaults) so the project
+  // no longer depends on the toolkit at all.
   "compilerOptions": {
+    "target": "ES2018",
+    "module": "esnext",
+    // FIX (2026-07): "node" (node10) resolution is deprecated and becomes an
+    // error in TypeScript 7. "bundler" matches how the code is actually
+    // consumed (webpack) and understands package.json "exports" maps.
+    "moduleResolution": "bundler",
+    "jsx": "react",
+    "lib": ["dom", "dom.iterable", "es2018"],
+    "strict": true,
+    "noImplicitAny": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "importHelpers": true,
+    // FIX (2026-07): removed deprecated "baseUrl" (TS 7 deprecation). All
+    // source imports are relative, so nothing depended on it.
     "rootDir": "./src",
-    "baseUrl": "./src",
-    "typeRoots": ["./node_modules/@types","./src/@types"]
-  }
+    "typeRoots": ["./node_modules/@types"]
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
 }
