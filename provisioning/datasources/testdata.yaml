@@ -1,0 +1,12 @@
+# TESTING (2026-07): Provisions Grafana's built-in TestData datasource for
+# the e2e tests. Grafana must be started with GF_PATHS_PROVISIONING pointing
+# at this repo's provisioning/ directory (see refactor_notes.md); the
+# @grafana/plugin-e2e fixtures read the same file to know which datasource
+# to select.
+apiVersion: 1
+
+datasources:
+  - name: TestData
+    type: grafana-testdata-datasource
+    uid: chord-e2e-testdata
+    editable: true
