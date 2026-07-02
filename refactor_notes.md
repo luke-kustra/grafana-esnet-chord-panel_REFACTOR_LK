@@ -31,50 +31,59 @@ This document summarizes the changes made during the 2026-07-01 refactor of the 
 
 ### Unit tests (Jest + React Testing Library, jsdom — no Grafana needed)
 
-Files: `src/chord.test.ts`, `src/ChordPanel.test.tsx`, `src/module.test.ts`
-Support files: `jest.config.js`, `jest-setup.js` (jsdom polyfills), `jest-mocks/style.js`
+Files: `tests/unit/` (see section 7 for the 2026-07-02 reorganization)
+Support files: `jest.config.js`, `tests/jest-setup.js` (jsdom polyfills), `tests/mocks/style.js`
 
-**`src/chord.test.ts` — d3 rendering module (14 tests)**
+**`tests/unit/data.test.ts` — matrix builder (11 tests)**
 
-- `prepData` (adjacency-matrix builder):
-  - builds `matrix[targetIdx][sourceIdx] = value` with a reverse name-lookup map
-  - aggregates repeated source/target pairs
-  - guesses the first three columns when no field names are configured
-  - returns nulls (renders nothing) when the configured fields are absent from the data
-- `makeColorer` (color resolution):
-  - classic-palette color assignment by matrix index
-  - chord colored by its source vs. target depending on the `colorBySource` option
-  - palette wrap-around when there are more nodes than palette colors
-- `createViz` (DOM output into a real SVG element):
-  - renders one ribbon per data row, one arc/label/tick per node, palette fills
-  - **no native `<title>` elements remain** (regression guard for the tooltip switch)
-  - `pointermove` on a ribbon invokes the tooltip callback with `{label: "X → Y", value, x, y}`; `pointerout` invokes it with `null`
-  - `pointermove` on an outer arc reports the node total
-  - guard clauses: too-small panel (radius < 180) and empty data render nothing
-  - re-rendering clears previous contents (no duplicated nodes)
-  - Note: tooltip labels follow the legacy matrix orientation (`matrix[target][source]`), identical to the pre-refactor `<title>` text.
+- builds `matrix[sourceIdx][targetIdx] = value` with an index→name lookup map
+- aggregates repeated source/target pairs
+- guesses the first three columns when no field names are configured
+- resolves fields configured by *display* name (e.g. `displayName` overrides)
+- returns a failure with a human-readable reason for each bad-input case:
+  configured field absent from the data, non-numeric value field, missing
+  frame, zero rows, null source/target values
 
-**`src/ChordPanel.test.tsx` — panel component (4 tests)**
+**`tests/unit/colors.test.ts` — color resolution (7 tests)**
+
+- classic-palette color assignment by matrix index, with wrap-around
+- chord colored by its source vs. target depending on the `colorBySource` option
+- fixed color mode, value-mapping overrides, and by-value gradient modes
+- palette fallback when the driving field is missing
+
+**`tests/unit/chord.test.ts` — d3 rendering (8 tests)**
+
+- renders one ribbon per data row, one arc/label/tick per node, palette fills
+- **no native `<title>` elements remain** (regression guard for the tooltip switch)
+- `pointermove` on a ribbon invokes the tooltip callback with the label in
+  **data direction** (`source → target`); `pointerout` invokes it with `null`
+- `pointermove` on an outer arc reports the node total (incoming + outgoing)
+- guard clauses: too-small panel (in either dimension) and an oversized Text
+  Length render nothing
+- re-rendering clears previous contents (no duplicated nodes)
+
+**`tests/unit/ChordPanel.test.tsx` — panel component (7 tests)**
 
 - shows the "Please set Source, Target and Value Field Options" message when field options are missing
+- shows the preparation failure reason (unknown field, non-numeric value field) as panel text
 - renders the chord SVG when options are set
-- **Grafana tooltip lifecycle**: hovering a chord renders the tooltip through a React `Portal` (asserted to be *outside* the panel SVG — i.e. Grafana's tooltip, not a native one); `pointerout` removes it
+- **Grafana tooltip lifecycle**: hovering a chord renders the tooltip through a React `Portal` (asserted to be *outside* the panel SVG — i.e. Grafana's tooltip, not a native one); `pointerout` removes it; a data refresh mid-hover clears it
 - rules-of-hooks regression test: flipping between the configured and unconfigured branches re-renders without crashing (the pre-refactor component called hooks conditionally and could crash exactly here)
 
-**`src/module.test.ts` — plugin wiring (3 tests)**
+**`tests/unit/module.test.ts` — plugin wiring (4 tests)**
 
 - exports a `PanelPlugin` wrapping `ChordPanel`
-- registers the expected options (`targetField`, `sourceField`, `valueField`, `colorBySource`, `txtLength`, `pointLength`, `labelSize`) with their defaults
-- the shared `listFieldNames` loader lists field display names from panel data
+- registers the expected options (`targetField`, `sourceField`, `valueField`, `colorBySource`, `txtLength`, `pointLength`, `labelSize`) with their defaults (order-independent assertions)
+- the shared `listFieldNames` loader lists field display names from the first frame only, and returns nothing without data
 
-**jsdom polyfills** (`jest-setup.js`): `TextEncoder`/`TextDecoder` (needed by `react-dom/server` via `@grafana/ui`), `ResizeObserver` (used by `VizTooltipContainer`), `matchMedia`, and `SVGElement.getComputedTextLength` (used by the label word-wrapper).
+**jsdom polyfills** (`tests/jest-setup.js`): `TextEncoder`/`TextDecoder` (needed by `react-dom/server` via `@grafana/ui`), `ResizeObserver` (used by `VizTooltipContainer`), `matchMedia`, and `SVGElement.getComputedTextLength` (used by the label word-wrapper).
 
 Run them:
 
 ```bash
-npm test                      # all unit tests
-npx jest --watch              # watch mode
-npx jest src/chord.test.ts    # a single suite
+npm test                             # all unit tests
+npx jest --watch                     # watch mode
+npx jest tests/unit/chord.test.ts    # a single suite
 ```
 
 ### End-to-end test (Playwright + @grafana/plugin-e2e — NO Docker)
@@ -174,8 +183,9 @@ Then: dashboard → Add panel → visualization picker → search **"ESnet Chord
 ### Sample datasets
 
 Use the **TestData** datasource → Scenario: **CSV Content**, and paste one of
-the datasets below. Reminder: the panel must be at least ~380px tall or the
-chord intentionally renders blank (legacy `radius < 180` guard).
+the datasets below. Reminder: the panel must be at least ~380px in BOTH
+dimensions or the chord intentionally renders blank (the diagram sizes to
+the shorter panel dimension; `MIN_RADIUS` guard, see section 7).
 
 **Dataset 1 — quick smoke test (3 nodes):**
 
@@ -236,5 +246,104 @@ collapse their arc labels to "`. . .`".
 4. **Standard options → Color scheme** — try a "by value" gradient (e.g.
    Green-Yellow-Red) for value-based coloring; with the classic palette,
    flip **Display → Color By** between Source and Target.
-5. Resize the panel below ~380px tall — it should blank out (legacy guard)
+5. Resize the panel below ~380px in either dimension — it should blank out
    and reappear when enlarged.
+6. Configure a Source/Target/Value field that doesn't exist in the data, or
+   a non-numeric Value field — the panel should show a message explaining
+   the problem instead of rendering blank.
+
+## 7. 2026-07-02 follow-up refactor
+
+A second pass over the codebase. Rendering output is unchanged for
+well-formed data and default options. Changes:
+
+### Module split
+
+`src/chord.ts` was split into three single-purpose modules:
+
+- **`src/data.ts`** — `prepData`: builds the adjacency matrix + index→name
+  map for `d3.chordDirected`.
+- **`src/colors.ts`** — `makeColorer`: resolves a chord/arc to a color from
+  the field config (palette / fixed / mappings / by-value gradients).
+- **`src/chord.ts`** — rendering only: `createViz` plus the label
+  word-wrapper. No data access, no React.
+
+### prepData rewritten
+
+- No longer iterates a `DataFrameView` row proxy (which required
+  `Object.keys()` on every row just to guess columns). The three `Field`
+  objects are resolved once up front, then their value arrays are iterated
+  directly.
+- Field names are matched against both the raw `field.name` and the Grafana
+  *display* name (`getFieldDisplayName`), since display names are what the
+  option editors list.
+- The `[null, null]` failure tuple was replaced with a discriminated union
+  (`PrepResult`): `{ ok: true, matrix, names, sourceField, targetField,
+  valueField }` or `{ ok: false, reason }`. The success value carries the
+  resolved `Field` objects so `makeColorer` and the value formatter no
+  longer re-scan `frame.fields`, and the failure reason is rendered as
+  panel text (like the "Please set …" prompt) instead of `console.log` +
+  a silently blank panel.
+
+### ChordPanel
+
+- `prepData` now runs in the panel, memoized on the panel data and the
+  three field options, and the prepared result is passed into `createViz`.
+  Resizing the panel redraws the SVG without re-aggregating the data.
+
+### createViz
+
+- The scattered magic numbers are named constants: `MIN_RADIUS` (180),
+  `MIN_INNER_RADIUS`, `BAND_WIDTH` (12), `LABEL_MARGIN` (4), `TICK_LENGTH`
+  (4), `LABEL_COLLAPSE_ANGLE` (0.025).
+- The diagram sizes to `min(width, height)` (it is square), so the
+  too-small guard now reflects what is actually drawn, and a guard on
+  `MIN_INNER_RADIUS` protects against a Text Length large enough to consume
+  the whole radius.
+- The ribbon generator is typed via `d3.ribbonArrow<d3.Chord,
+  d3.ChordSubgroup>()`; the one remaining cast (the generator's void return
+  type, an artifact of `@types/d3` modeling canvas rendering) is localized
+  and documented.
+
+### module.ts
+
+- `listFieldNames` offers only the first frame's fields, since only
+  `data.series[0]` is visualized — fields from other frames could never
+  render.
+
+### Test reorganization (all testing files under `tests/`)
+
+```
+tests/
+├── e2e/chordPanel.spec.ts     # Playwright e2e (unchanged location)
+├── unit/
+│   ├── data.test.ts           # prepData: matrix, aggregation, guessing,
+│   │                          #   display-name resolution, failure reasons
+│   ├── colors.test.ts         # makeColorer: palette, fixed, mappings,
+│   │                          #   by-value gradient, fallbacks
+│   ├── chord.test.ts          # createViz DOM output, tooltip callbacks,
+│   │                          #   size guards, redraw clearing
+│   ├── ChordPanel.test.tsx    # component: messages, tooltip lifecycle
+│   │                          #   (incl. cleared on data refresh),
+│   │                          #   rules-of-hooks regression
+│   ├── module.test.ts         # plugin wiring (order-independent asserts)
+│   └── helpers.ts             # shared frame/panel-data builders
+├── jest-setup.js              # jsdom polyfills (moved from repo root)
+├── mocks/style.js             # style/img stub (was jest-mocks/)
+└── testing.d.ts               # jest-dom matcher types (was src/)
+```
+
+Config updates that came with the move: `jest.config.js` (`testMatch`,
+`setupFilesAfterEnv`, `moduleNameMapper` paths), `tsconfig.json` (includes
+`tests/`, dropped `rootDir` so the whole tree type-checks), and `npm run
+lint` now covers `./src` and `./tests`.
+
+Coverage grew from 21 to 37 unit tests; the e2e spec now asserts the exact
+tooltip label/value pairing on hover.
+
+### Verified results (2026-07-02)
+
+- Unit: **37/37 passing** (`npm test`)
+- E2E: **3/3 passing** against a local Homebrew **Grafana 13.0.2** using the
+  isolated-instance steps in section 5
+- `npm run typecheck`, `npm run lint`, and `npm run build` all clean

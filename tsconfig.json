@@ -24,9 +24,10 @@
     "importHelpers": true,
     // FIX (2026-07): removed deprecated "baseUrl" (TS 7 deprecation). All
     // source imports are relative, so nothing depended on it.
-    "rootDir": "./src",
+    // REFACTOR (2026-07-02): removed "rootDir": "./src" so the tests/ tree
+    // (unit + e2e) is type-checked alongside the sources.
     "typeRoots": ["./node_modules/@types"]
   },
-  "include": ["src"],
+  "include": ["src", "tests"],
   "exclude": ["node_modules", "dist"]
 }

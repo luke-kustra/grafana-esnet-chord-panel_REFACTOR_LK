@@ -1,32 +1,20 @@
-// REFACTOR (2026-07): This module was previously chord.js (plain JavaScript
-// with a hand-written chord.d.ts stub). Summary of changes:
-//  - Converted to TypeScript; the chord.d.ts stub was deleted.
-//  - d3 is now imported from the npm `d3` package instead of a 274 KB
-//    minified copy vendored into src/ (d3.min.js / d3-color.v1.min.js).
-//  - TOOLTIP CHANGE: the native SVG `<title>` elements (browser-default
-//    tooltips) were removed. Chords and arcs now emit pointer events through
-//    an `onTooltip` callback, and ChordPanel.tsx renders the hover content in
-//    Grafana's own tooltip component so it matches the Grafana theme.
-//  - The React hooks (useTheme2/useD3) that used to live at the bottom of
-//    this file were moved into ChordPanel.tsx. Calling hooks from a plain
-//    function that was itself called conditionally violated React's rules of
-//    hooks; this module is now pure rendering logic with no React imports.
-//  - The value display processor is now looked up by the user-selected value
-//    field instead of the previously hard-coded column index 2 (this resolves
-//    an old `TODO` in the original source).
-//  - createViz's long positional parameter list was replaced with a single
-//    typed options object.
+// REFACTOR (2026-07-02): This module is now rendering-only. The matrix
+// aggregation (prepData) moved to data.ts and color resolution (makeColorer)
+// moved to colors.ts; createViz receives the prepared matrix via
+// ChordVizOptions.prep instead of raw PanelData, so the panel can memoize
+// data preparation independently of redraws (a resize no longer re-aggregates
+// the data). The magic layout numbers (band width, tick length, minimum
+// radius, label-collapse threshold) are now named constants.
+//
+// Earlier refactor (2026-07): converted from chord.js to TypeScript; d3 from
+// npm instead of a vendored minified copy; native SVG <title> tooltips
+// replaced by an onTooltip callback rendered with Grafana's tooltip in
+// ChordPanel.tsx; React hooks moved out of this module.
 import * as d3 from 'd3';
-import {
-  classicColors,
-  DataFrame,
-  DataFrameView,
-  DisplayProcessor,
-  Field,
-  FieldColorModeId,
-  GrafanaTheme2,
-  PanelData,
-} from '@grafana/data';
+import { DisplayProcessor, GrafanaTheme2 } from '@grafana/data';
+
+import { PrepSuccess } from './data';
+import { ChordDatum, makeColorer } from './colors';
 
 /** Hover payload handed to the React layer for Grafana tooltip rendering. */
 export interface ChordTooltipData {
@@ -43,11 +31,10 @@ export interface ChordTooltipData {
 export type TooltipCallback = (tooltip: ChordTooltipData | null) => void;
 
 export interface ChordVizOptions {
-  data: PanelData;
+  /** prepared adjacency matrix + resolved fields (see prepData in data.ts) */
+  prep: PrepSuccess;
+  width: number;
   height: number;
-  src?: string;
-  target?: string;
-  val?: string;
   txtLen: number;
   labelSize: number;
   colorBySource: boolean;
@@ -56,20 +43,31 @@ export interface ChordVizOptions {
   onTooltip: TooltipCallback;
 }
 
-type ChordDatum = d3.Chord | d3.ChordGroup | d3.ChordSubgroup;
+/** Below this radius the diagram is unreadable, so nothing is rendered. */
+export const MIN_RADIUS = 180;
+/** Minimum radius left for the chords after reserving label space; guards
+ *  against a large Text Length driving the inner radius negative. */
+export const MIN_INNER_RADIUS = 20;
+/** Thickness of the outer arc band. */
+const BAND_WIDTH = 12;
+/** Gap between the outer band and the start of a label. */
+const LABEL_MARGIN = 4;
+/** Length of the small tick between an arc and its label. */
+const TICK_LENGTH = 4;
+/** Arcs spanning less than this angle (radians) collapse their label. */
+const LABEL_COLLAPSE_ANGLE = 0.025;
+const LABEL_COLLAPSE_TEXT = '. . .';
 
 /**
  * Create the chord diagram using d3.
  * @param elem The parent svg element that will house this diagram
- * @param options All rendering inputs (data, sizing, field names, theme, and
- *   the tooltip callback) as a single typed object.
+ * @param options All rendering inputs (prepared data, sizing, theme, and the
+ *   tooltip callback) as a single typed object.
  */
 export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions): void {
-  const { data, height, src, target, val, txtLen, labelSize, colorBySource, pointLength, theme, onTooltip } = options;
+  const { prep, width, height, txtLen, labelSize, colorBySource, pointLength, theme, onTooltip } = options;
 
-  // do a bit of work to setup the visual layout of the widget --------
   if (elem === null) {
-    console.log('bailing after failing to find parent element');
     return;
   }
   while (elem.firstChild) {
@@ -79,56 +77,45 @@ export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions):
 
   const svg = d3.select(elem);
 
-  svg.attr('viewBox', `${-height / 2}, ${-height / 2}, ${height}, ${height}`);
-
-  const diameter = height;
+  // The diagram is square; fit it to the shorter panel dimension so the
+  // size guards below reflect what is actually drawn.
+  const diameter = Math.min(width, height);
   const radius = diameter / 2;
 
-  if (radius < 180) {
+  svg.attr('viewBox', `${-radius}, ${-radius}, ${diameter}, ${diameter}`);
+
+  if (radius < MIN_RADIUS) {
     // too small to do anything useful
-    console.log('too small to render');
     return;
   }
   // leave room for labels on outside
-  const innerRadius = radius - (txtLen + 4 + 12);
+  const innerRadius = radius - (txtLen + LABEL_MARGIN + BAND_WIDTH);
   // sets size of outer band
-  const outerRadius = innerRadius + 12;
+  const outerRadius = innerRadius + BAND_WIDTH;
 
-  const frame = data.series[0];
-
-  if (frame === null || frame === undefined) {
-    // no data, bail
-    console.log('no data , no dice');
+  if (innerRadius < MIN_INNER_RADIUS) {
+    // the configured Text Length leaves no room for the chords
     return;
   }
 
-  const view = new DataFrameView(frame);
-  const [matrix, nameRevIdx] = prepData(view, src, target, val);
+  const { matrix, names, sourceField, targetField, valueField } = prep;
 
-  if (matrix === null || nameRevIdx === null) {
-    return;
-  }
-
-  // REFACTOR (2026-07): The display processor used to be hard-coded to
-  // column 2 ("questionable assumption" per the original comment/TODO). It is
-  // now resolved from the value field the user actually selected, falling
-  // back to column 2 only when no match is found.
-  let valueFieldIndex = frame.fields.findIndex((f) => f.name === val);
-  if (valueFieldIndex === -1) {
-    valueFieldIndex = 2;
-  }
-  // getFieldDisplayProcessor can return undefined in modern @grafana/data,
-  // so fall back to a plain text formatter.
+  // Grafana attaches a display processor to fields it has processed; fall
+  // back to a plain text formatter when one is absent.
   const fieldDisplay: DisplayProcessor =
-    view.getFieldDisplayProcessor(valueFieldIndex) ?? ((value: unknown) => ({ text: String(value), numeric: Number(value) }));
+    valueField.display ?? ((value: unknown) => ({ text: String(value), numeric: Number(value) }));
 
   const arc = d3.arc<d3.ChordGroup>().innerRadius(innerRadius).outerRadius(outerRadius);
 
   const ribbon = d3
-    .ribbonArrow()
+    .ribbonArrow<d3.Chord, d3.ChordSubgroup>()
     .radius(innerRadius - 2)
     .padAngle(2 / innerRadius)
     .headRadius(innerRadius * (pointLength / 100.0));
+  // The @types/d3 ribbon generator's first overload is typed for
+  // canvas-context rendering (returning void), but with no context set it
+  // returns an SVG path string.
+  const ribbonPath = (d: d3.Chord) => ribbon(d) as unknown as string;
 
   const chordLayout = d3
     .chordDirected()
@@ -139,31 +126,31 @@ export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions):
   const chords = chordLayout(matrix);
 
   // build ordinal color scale keyed on index used in the matrix
-  const color = makeColorer(colorBySource, nameRevIdx, frame, src, target, val);
+  const color = makeColorer(colorBySource, names, { sourceField, targetField, valueField });
 
   // Darken helper; d3.color() can return null so guard before calling darker.
   const darker = (d: ChordDatum) => d3.color(color(d))?.darker()?.toString() ?? null;
 
-  // REFACTOR (2026-07): Tooltip helpers. These replace the old
-  // `.append('title')` calls: instead of relying on the browser-native
-  // tooltip, hover data is forwarded to React via onTooltip so it can be
-  // rendered with Grafana's themed tooltip.
+  // Tooltip helpers: hover data is forwarded to React via onTooltip so it can
+  // be rendered with Grafana's themed tooltip.
+  const formatValue = (value: number) => {
+    const disp = fieldDisplay(value);
+    return `${disp.text}${disp.suffix ? ` ${disp.suffix}` : ''}`;
+  };
   const chordTooltip = (event: PointerEvent, d: d3.Chord) => {
-    const from = nameRevIdx.get(d.source.index);
-    const to = nameRevIdx.get(d.target.index);
-    const disp = fieldDisplay(d.source.value);
     onTooltip({
-      label: `${from} → ${to}`,
-      value: `${disp.text}${disp.suffix ? ` ${disp.suffix}` : ''}`,
+      label: `${names.get(d.source.index)} → ${names.get(d.target.index)}`,
+      value: formatValue(d.source.value),
       x: event.clientX,
       y: event.clientY,
     });
   };
   const groupTooltip = (event: PointerEvent, d: d3.ChordGroup) => {
-    const disp = fieldDisplay(d.value);
+    // A directed chord group's value is the sum of its incoming AND outgoing
+    // flows (see d3-chord's groupSums), i.e. the total through the node.
     onTooltip({
-      label: `${nameRevIdx.get(d.index)} (total)`,
-      value: `${disp.text}${disp.suffix ? ` ${disp.suffix}` : ''}`,
+      label: `${names.get(d.index)} (total)`,
+      value: formatValue(d.value),
       x: event.clientX,
       y: event.clientY,
     });
@@ -174,15 +161,13 @@ export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions):
   svg
     .append('g')
     .attr('fill-opacity', 0.99)
-    .selectAll('g')
+    .selectAll('path')
     .data(chords)
     .join('path')
-    .attr('d', ribbon as unknown as (d: d3.Chord) => string)
+    .attr('d', ribbonPath)
     .attr('fill', (d) => color(d))
     .attr('stroke', (d) => darker(d))
     .style('mix-blend-mode', 'normal')
-    // REFACTOR (2026-07): was `.call((g) => g.append('title')...)` - now
-    // feeds Grafana's tooltip instead of the native browser tooltip.
     .on('pointermove', chordTooltip)
     .on('pointerout', hideTooltip);
 
@@ -200,7 +185,6 @@ export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions):
         .attr('d', arc)
         .attr('fill', (d) => color(d))
         .attr('stroke', (d) => darker(d))
-        // REFACTOR (2026-07): was `.append('title')` - see note above.
         .on('pointermove', groupTooltip)
         .on('pointerout', hideTooltip)
     )
@@ -209,7 +193,7 @@ export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions):
         .append('g')
         .attr('transform', (d) => {
           const rot = (((d.startAngle + d.endAngle) / 2) * 180) / Math.PI - 90;
-          const trans = outerRadius + txtLen / 2 + 4;
+          const trans = outerRadius + txtLen / 2 + LABEL_MARGIN;
           return `rotate(${rot}) translate(${trans}, 0)`;
         })
         .attr('fill', theme.colors.text.primary)
@@ -218,7 +202,7 @@ export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions):
         .attr('text-anchor', (d) => (d.startAngle < Math.PI ? 'start' : 'end'))
         .attr('transform', (d) => (d.startAngle >= Math.PI ? 'rotate(180)' : null))
         // dont show if the "pie" is too small
-        .text((d) => (d.endAngle - d.startAngle > 0.025 ? nameRevIdx.get(d.index) ?? '' : '. . .'))
+        .text((d) => (d.endAngle - d.startAngle > LABEL_COLLAPSE_ANGLE ? names.get(d.index) ?? '' : LABEL_COLLAPSE_TEXT))
         .call(wrap, txtLen)
     )
     .call((g) =>
@@ -229,13 +213,12 @@ export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions):
           return `rotate(${rot}) translate(${outerRadius},0)`;
         })
         .attr('stroke', (d) => darker(d))
-        .attr('x2', 4)
+        .attr('x2', TICK_LENGTH)
     );
 }
 
 /**
  * Word-wrap the outer labels to fit within the reserved text length.
- * REFACTOR (2026-07): converted to typed d3 selections; logic unchanged.
  */
 function wrap(text: d3.Selection<SVGTextElement, d3.ChordGroup, SVGGElement, unknown>, width: number) {
   text.each(function () {
@@ -262,156 +245,4 @@ function wrap(text: d3.Selection<SVGTextElement, d3.ChordGroup, SVGGElement, unk
       }
     }
   });
-}
-
-/**
- * this function creates an adjacency matrix to be consumed by the chord
- * function returns the matrix + a reverse lookup Map to go from source and
- * target id to description assumes that data coming to us has at least 3
- * columns if no preferences provided, assumes the first 3 columns are source
- * and target dimensions then value to display
- * REFACTOR (2026-07): converted to TypeScript; the failure return value was
- * normalized to `[null, null]` (it used to be a 3-tuple even though the
- * success path returned a 2-tuple).
- * @param data Data for the chord diagram
- * @param src The data series that will act as the source
- * @param target The data series that will act as the target
- * @param val The data series that will act as the value
- */
-// TESTING (2026-07): exported so unit tests can exercise the matrix
-// aggregation logic directly (see chord.test.ts).
-export function prepData(
-  data: DataFrameView,
-  src?: string,
-  target?: string,
-  val?: string
-): [number[][], Map<number, string>] | [null, null] {
-  // create array of names
-  let sourceKey = src;
-  let targetKey = target;
-  let valKey = val;
-  const names: Record<string, number> = {};
-
-  let err = 0;
-  data.forEach((row: Record<string, unknown>) => {
-    const rowKey = Object.keys(row);
-    if (sourceKey === undefined) {
-      sourceKey = rowKey[0];
-    }
-    if (targetKey === undefined) {
-      targetKey = rowKey[1];
-    }
-    if (valKey === undefined) {
-      valKey = rowKey[2];
-    }
-
-    const sourceVal = row[sourceKey];
-    const targetVal = row[targetKey];
-
-    // either the provided keys or the guessed keys arent working
-    if (sourceVal === null || sourceVal === undefined || targetVal === null || targetVal === undefined) {
-      console.log('can not find the source or target in the data set, bailing');
-      err = 1;
-      return;
-    }
-    names[String(sourceVal)] = 1;
-    names[String(targetVal)] = 1;
-  });
-
-  if (err) {
-    // something is wonky with the data
-    return [null, null];
-  }
-
-  // build matrix
-  const nameArray = Object.keys(names);
-  const index = new Map(nameArray.map((name, i) => [name, i]));
-  const revIdx = new Map(nameArray.map((name, i) => [i, name]));
-  const matrix: number[][] = Array.from(index, () => new Array(nameArray.length).fill(0));
-  data.forEach((row: Record<string, unknown>) => {
-    // The keys of the names object were coerced to strings. If any values here
-    // are not strings, cast them to strings.
-    const s = String(row[sourceKey!]);
-    const t = String(row[targetKey!]);
-    const v = Number(row[valKey!]);
-    // aggregate data
-    matrix[index.get(t)!][index.get(s)!] += v;
-  });
-  return [matrix, revIdx];
-}
-
-/**
- * Make a function that will take in a chord and return the appropriate color.
- * REFACTOR (2026-07): converted to TypeScript with null-safe access to field
- * config (color mode, mappings, display processors); behavior unchanged.
- * @param colorBySource Whether chords are colored the same as the source of
- *   the chord or the target
- * @param nameRevIdx A map of chord endpoint indices to names
- * @param frame The data frame being visualized
- * @param src The data series that will act as the source
- * @param target The data series that will act as the target
- * @param val The data series that will act as the value
- */
-// TESTING (2026-07): exported so unit tests can exercise the color
-// resolution logic directly (see chord.test.ts).
-export function makeColorer(
-  colorBySource: boolean,
-  nameRevIdx: Map<number, string>,
-  frame: DataFrame,
-  src?: string,
-  target?: string,
-  val?: string
-) {
-  let sourceField: Field | undefined;
-  let targetField: Field | undefined;
-  let valueField: Field | undefined;
-
-  frame.fields.forEach((curr) => {
-    if (curr.name === src) {
-      sourceField = curr;
-    }
-    if (curr.name === target) {
-      targetField = curr;
-    }
-    if (curr.name === val) {
-      valueField = curr;
-    }
-  });
-
-  const fallback = (index: number) => classicColors[index % classicColors.length];
-
-  const color = (v: ChordDatum): string => {
-    if ('source' in v && 'target' in v) {
-      if (colorBySource) {
-        return color(v.source);
-      }
-      return color(v.target);
-    }
-    const curr = colorBySource ? sourceField : targetField;
-    if (!curr) {
-      return fallback(v.index);
-    }
-    const colorMode = curr.config.color?.mode;
-
-    // Are we in some discrete color mode (i.e. non-gradient).
-    if (colorMode === FieldColorModeId.PaletteClassic || colorMode === FieldColorModeId.Fixed) {
-      const name = nameRevIdx.get(v.index);
-      // A mapping override exists for this value
-      const mappings = curr.config.mappings ?? [];
-      if (name !== undefined && mappings.some((m) => Object.prototype.hasOwnProperty.call(m.options ?? {}, name))) {
-        return curr.display?.(name).color ?? fallback(v.index);
-      }
-      // The classic palette ties a specific color to an entire series. For
-      // this plugin, we want to tie a specific color to a value in the series.
-      if (colorMode === FieldColorModeId.PaletteClassic) {
-        return fallback(v.index);
-      }
-      return curr.display?.(v.index).color ?? fallback(v.index);
-    }
-
-    // Otherwise, we're going to look at the value directly to decide on the
-    // color.
-    return valueField?.display?.(v.value).color ?? fallback(v.index);
-  };
-  return color;
 }

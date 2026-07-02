@@ -1,27 +1,23 @@
-// REFACTOR (2026-07): This component was previously src/esnetChord.tsx.
-// Summary of changes:
-//  - Renamed esnetChord -> ChordPanel (React components should be
-//    PascalCase; lowercase component names break JSX resolution and linting).
-//  - FIXED RULES-OF-HOOKS VIOLATIONS: the old component called useTheme2()
-//    only in the else-branch and called chord() (which internally used
-//    useD3/useTheme2) only in the if-branch. Hooks called conditionally can
-//    crash React whenever the branch flips. All hooks are now called
-//    unconditionally at the top of the component.
-//  - TOOLTIP CHANGE: hover details previously rendered as native SVG
-//    <title> browser tooltips inside chord.js. The d3 layer now reports
-//    hover state via a callback, and this component renders it with
-//    Grafana's own tooltip primitives (Portal + VizTooltipContainer from
-//    @grafana/ui), so tooltips follow the Grafana theme (dark/light) and
-//    look like every other panel's tooltip.
-//  - The d3 redraw now only happens when data/size/options/theme change,
-//    not on every render (necessary so tooltip state updates don't rebuild
-//    the whole SVG on each mouse move).
-import React, { useCallback, useState } from 'react';
+// REFACTOR (2026-07-02): Data preparation (prepData) is now invoked here,
+// memoized on the panel data and the three field options, and passed into
+// createViz. Two consequences:
+//  - Resizing the panel redraws the SVG without re-aggregating the data.
+//  - Preparation failures (bad field names, non-numeric values, no data)
+//    carry a reason that is rendered as panel text instead of a silent
+//    blank panel + console noise.
+//
+// Earlier refactor (2026-07): renamed from esnetChord; fixed
+// rules-of-hooks violations (all hooks now run unconditionally at the top);
+// native SVG <title> tooltips replaced with Grafana's Portal +
+// VizTooltipContainer; the d3 redraw only happens when its inputs change so
+// tooltip state updates don't rebuild the SVG on each mouse move.
+import React, { useCallback, useMemo, useState } from 'react';
 import { PanelProps } from '@grafana/data';
 import { Portal, useTheme2, VizTooltipContainer } from '@grafana/ui';
 
 import { ChordOptions } from './types';
 import { createViz, ChordTooltipData } from './chord';
+import { prepData } from './data';
 import { useD3 } from './useD3';
 
 interface Props extends PanelProps<ChordOptions> {}
@@ -34,20 +30,25 @@ export const ChordPanel = ({ options, data, width, height }: Props) => {
 
   const hasRequiredFields = Boolean(options.sourceField && options.targetField && options.valueField);
 
+  // Memoized separately from rendering so redraws (e.g. on resize) reuse the
+  // aggregated matrix.
+  const prep = useMemo(
+    () => prepData(data.series[0], options.sourceField, options.targetField, options.valueField),
+    [data, options.sourceField, options.targetField, options.valueField]
+  );
+
   const ref = useD3<SVGSVGElement>(
     (svg) => {
-      // BUGFIX (2026-07): clear any lingering tooltip before redrawing. If
-      // the data refreshes while a chord is hovered, the hovered element is
-      // destroyed by the redraw and its pointerout never fires, which would
-      // otherwise leave the tooltip stuck on screen.
+      // Clear any lingering tooltip before redrawing. If the data refreshes
+      // while a chord is hovered, the hovered element is destroyed by the
+      // redraw and its pointerout never fires, which would otherwise leave
+      // the tooltip stuck on screen.
       onTooltip(null);
-      if (hasRequiredFields) {
+      if (hasRequiredFields && prep.ok) {
         createViz(svg, {
-          data,
+          prep,
+          width,
           height,
-          src: options.sourceField,
-          target: options.targetField,
-          val: options.valueField,
           txtLen: options.txtLength,
           labelSize: options.labelSize,
           colorBySource: options.colorBySource,
@@ -58,14 +59,20 @@ export const ChordPanel = ({ options, data, width, height }: Props) => {
       }
     },
     // Redraw only when the inputs to the visualization change.
-    [data, width, height, options, theme, hasRequiredFields, onTooltip]
+    [prep, width, height, options, theme, hasRequiredFields, onTooltip]
   );
 
-  if (!hasRequiredFields) {
+  const message = !hasRequiredFields
+    ? 'Please set Source, Target and Value Field Options'
+    : !prep.ok
+      ? prep.reason
+      : null;
+
+  if (message !== null) {
     return (
       <svg width={width} height={height}>
         <text x="0" y="15" fill={theme.colors.text.primary}>
-          Please set Source, Target and Value Field Options
+          {message}
         </text>
       </svg>
     );
@@ -74,9 +81,9 @@ export const ChordPanel = ({ options, data, width, height }: Props) => {
   return (
     <>
       <svg ref={ref} width={width} height={height} />
-      {/* REFACTOR (2026-07): Grafana-native tooltip rendering. Portal mounts
-          the tooltip at the document root (so it is not clipped by the panel)
-          and VizTooltipContainer provides Grafana's standard themed tooltip
+      {/* Grafana-native tooltip rendering. Portal mounts the tooltip at the
+          document root (so it is not clipped by the panel) and
+          VizTooltipContainer provides Grafana's standard themed tooltip
           chrome and positioning. */}
       {tooltip && (
         <Portal>

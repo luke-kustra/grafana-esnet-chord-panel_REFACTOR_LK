@@ -21,7 +21,9 @@ const esModules = [
 
 module.exports = {
   testEnvironment: 'jest-environment-jsdom',
-  testMatch: ['<rootDir>/src/**/*.{spec,test}.{js,jsx,ts,tsx}'],
+  // REFACTOR (2026-07-02): all testing-related files now live under tests/
+  // (unit tests in tests/unit, e2e in tests/e2e, setup + mocks alongside).
+  testMatch: ['<rootDir>/tests/unit/**/*.{spec,test}.{js,jsx,ts,tsx}'],
   transform: {
     '^.+\\.(t|j)sx?$': [
       '@swc/jest',
@@ -39,10 +41,10 @@ module.exports = {
   moduleNameMapper: {
     // TESTING (2026-07): stub out stylesheet and image imports (jsdom cannot
     // parse them; @grafana/ui transitively imports CSS).
-    '\\.(css|scss|sass|less)$': '<rootDir>/jest-mocks/style.js',
-    '\\.(png|jpe?g|gif|svg)$': '<rootDir>/jest-mocks/style.js',
+    '\\.(css|scss|sass|less)$': '<rootDir>/tests/mocks/style.js',
+    '\\.(png|jpe?g|gif|svg)$': '<rootDir>/tests/mocks/style.js',
   },
   // TESTING (2026-07): registers @testing-library/jest-dom matchers and
   // polyfills jsdom gaps (SVG text measurement, matchMedia).
-  setupFilesAfterEnv: ['<rootDir>/jest-setup.js'],
+  setupFilesAfterEnv: ['<rootDir>/tests/jest-setup.js'],
 };

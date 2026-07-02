@@ -1,40 +1,21 @@
 // TESTING (2026-07): Component tests for ChordPanel using React Testing
 // Library. Covers:
 //  - the "missing field options" guidance message
+//  - visible error messages for bad configurations (unknown field,
+//    non-numeric value field) instead of a silent blank panel
 //  - full rendering of the chord SVG when options are set
 //  - the Grafana tooltip lifecycle: appears (in a portal, outside the
-//    panel's SVG) on chord hover, updates content, and disappears on
-//    pointerout - the behavior that replaced native <title> tooltips
+//    panel's SVG) on chord hover, disappears on pointerout, and is cleared
+//    when the data refreshes mid-hover
 //  - no crash when the required-fields branch flips (the old component
 //    violated the rules of hooks here)
 import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
-import {
-  FieldColorModeId,
-  FieldType,
-  LoadingState,
-  PanelData,
-  PanelProps,
-  getDefaultTimeRange,
-  toDataFrame,
-} from '@grafana/data';
+import { FieldType, PanelProps, toDataFrame } from '@grafana/data';
 
-import { ChordPanel } from './ChordPanel';
-import { ChordOptions } from './types';
-
-function buildPanelData(): PanelData {
-  const frame = toDataFrame({
-    fields: [
-      { name: 'source', type: FieldType.string, values: ['LBL', 'ANL'] },
-      { name: 'target', type: FieldType.string, values: ['ANL', 'CERN'] },
-      { name: 'value', type: FieldType.number, values: [10, 5] },
-    ],
-  });
-  for (const field of frame.fields) {
-    field.config = { color: { mode: FieldColorModeId.PaletteClassic }, mappings: [] };
-  }
-  return { series: [frame], state: LoadingState.Done, timeRange: getDefaultTimeRange() };
-}
+import { ChordPanel } from '../../src/ChordPanel';
+import { ChordOptions } from '../../src/types';
+import { buildPanelData } from './helpers';
 
 const options: ChordOptions = {
   sourceField: 'source',
@@ -65,11 +46,29 @@ describe('ChordPanel', () => {
     expect(screen.getByText('Please set Source, Target and Value Field Options')).toBeInTheDocument();
   });
 
+  it('explains when a configured field is not present in the data', () => {
+    const props = buildProps({ options: { ...options, sourceField: 'bogus' } });
+    render(<ChordPanel {...props} />);
+    expect(screen.getByText('Source field "bogus" not found in the query result')).toBeInTheDocument();
+  });
+
+  it('explains when the value field is not numeric', () => {
+    const frame = toDataFrame({
+      fields: [
+        { name: 'source', type: FieldType.string, values: ['LBL'] },
+        { name: 'target', type: FieldType.string, values: ['ANL'] },
+        { name: 'value', type: FieldType.string, values: ['fast'] },
+      ],
+    });
+    render(<ChordPanel {...buildProps({ data: buildPanelData(frame) })} />);
+    expect(screen.getByText(/non-numeric/)).toBeInTheDocument();
+  });
+
   it('renders the chord diagram when all field options are set', () => {
     const { container } = render(<ChordPanel {...buildProps()} />);
     const svg = container.querySelector('svg')!;
     expect(svg).toBeInTheDocument();
-    // 2 data rows -> 2 ribbons; 3 names -> 3 outer arcs
+    // 3 data rows -> 3 ribbons; 3 names -> 3 outer arcs
     expect(svg.querySelectorAll('path').length).toBeGreaterThanOrEqual(5);
   });
 
@@ -91,6 +90,18 @@ describe('ChordPanel', () => {
     expect(container.querySelector('svg')!.contains(label)).toBe(false);
 
     fireEvent(ribbon, new MouseEvent('pointerout', { bubbles: true }));
+    expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+  });
+
+  it('clears a lingering tooltip when the data refreshes mid-hover', () => {
+    const { container, rerender } = render(<ChordPanel {...buildProps()} />);
+    const ribbon = container.querySelector('svg g[fill-opacity] path')!;
+    fireEvent(ribbon, new MouseEvent('pointermove', { bubbles: true, clientX: 100, clientY: 120 }));
+    expect(screen.getByText(/→/)).toBeInTheDocument();
+
+    // A data refresh destroys the hovered element, so its pointerout never
+    // fires; the redraw itself must clear the tooltip.
+    rerender(<ChordPanel {...buildProps({ data: buildPanelData() })} />);
     expect(screen.queryByText(/→/)).not.toBeInTheDocument();
   });
 

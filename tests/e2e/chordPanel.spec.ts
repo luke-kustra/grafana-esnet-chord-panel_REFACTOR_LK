@@ -77,8 +77,19 @@ test('renders the chord diagram and shows a Grafana tooltip on hover', async ({
   // TOOLTIP: hovering a chord shows Grafana's themed tooltip (rendered in a
   // portal at the document root, NOT a native SVG <title>).
   await expect(svg.locator('title')).toHaveCount(0);
-  await ribbons.first().hover();
-  await expect(page.getByText(/\s→\s/)).toBeVisible();
+  // Ribbons overlap near the center of the diagram, so a strict hover can be
+  // rejected ("intercepts pointer events"); force it and accept whichever
+  // ribbon is topmost at that point.
+  await ribbons.first().hover({ force: true });
+  // The label must read in DATA direction (source → target); a transposed
+  // matrix would produce reversed labels (e.g. "ANL → LBL") matching none
+  // of these.
+  const tooltipLabel = page.getByText(/^(LBL → ANL|ANL → CERN|LBL → CERN)$/);
+  await expect(tooltipLabel).toBeVisible();
+  // The tooltip pairs the hovered chord with its aggregated value.
+  const values: Record<string, string> = { 'LBL → ANL': '10', 'ANL → CERN': '5', 'LBL → CERN': '3' };
+  const labelText = (await tooltipLabel.textContent())!;
+  await expect(tooltipLabel.locator('xpath=following-sibling::div/strong')).toHaveText(values[labelText]);
 
   // Moving the pointer off the chord hides the tooltip again.
   await page.mouse.move(0, 0);

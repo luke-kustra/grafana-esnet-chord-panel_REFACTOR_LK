@@ -25,16 +25,17 @@ const OptionsCategory = ['Display'];
 
 /**
  * Shared options-loader for the Source/Target/Value select editors: lists
- * the display names of every field in the current query result.
+ * the display names of the fields in the first frame of the query result.
+ * Only the first frame is visualized, so fields from other frames are not
+ * offered (they could never render).
  */
 const listFieldNames = async (context: FieldOverrideContext): Promise<Array<SelectableValue<string>>> => {
   const options: Array<SelectableValue<string>> = [];
-  if (context && context.data) {
-    for (const frame of context.data) {
-      for (const field of frame.fields) {
-        const name = getFieldDisplayName(field, frame, context.data);
-        options.push({ value: name, label: name });
-      }
+  const frame = context?.data?.[0];
+  if (frame) {
+    for (const field of frame.fields) {
+      const name = getFieldDisplayName(field, frame, context.data);
+      options.push({ value: name, label: name });
     }
   }
   return options;
