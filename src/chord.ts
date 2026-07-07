@@ -10,6 +10,14 @@
 // npm instead of a vendored minified copy; native SVG <title> tooltips
 // replaced by an onTooltip callback rendered with Grafana's tooltip in
 // ChordPanel.tsx; React hooks moved out of this module.
+//
+// FEATURE (2026-07-07): Value Mapping support. The user-facing strings (outer
+// arc labels + both tooltip labels) now read from prep.displayNames (raw value
+// run through the field display processor, so value mappings relabel nodes)
+// instead of the raw prep.names. makeColorer still receives the raw `names`
+// map, since color/value-mapping resolution keys on the raw node identity.
+// NOTE: the outer-ring "unit is undefined" report is already handled by the
+// suffix-guarded formatValue() below (`disp.suffix ? ... : ''`).
 import * as d3 from 'd3';
 import { DisplayProcessor, GrafanaTheme2 } from '@grafana/data';
 
@@ -98,7 +106,9 @@ export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions):
     return;
   }
 
-  const { matrix, names, sourceField, targetField, valueField } = prep;
+  // `names` holds raw node identities (used for color/value-mapping lookup);
+  // `displayNames` holds the mapped/formatted labels shown to the user.
+  const { matrix, names, displayNames, sourceField, targetField, valueField } = prep;
 
   // Grafana attaches a display processor to fields it has processed; fall
   // back to a plain text formatter when one is absent.
@@ -135,11 +145,15 @@ export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions):
   // be rendered with Grafana's themed tooltip.
   const formatValue = (value: number) => {
     const disp = fieldDisplay(value);
+    // Guard the unit suffix: when no unit is configured the display processor
+    // returns an undefined suffix, so appending it unconditionally would print
+    // the literal "undefined" on hover (the outer-ring bug report).
     return `${disp.text}${disp.suffix ? ` ${disp.suffix}` : ''}`;
   };
   const chordTooltip = (event: PointerEvent, d: d3.Chord) => {
     onTooltip({
-      label: `${names.get(d.source.index)} → ${names.get(d.target.index)}`,
+      // FEATURE (2026-07-07): mapped labels via displayNames (was raw names).
+      label: `${displayNames.get(d.source.index)} → ${displayNames.get(d.target.index)}`,
       value: formatValue(d.source.value),
       x: event.clientX,
       y: event.clientY,
@@ -149,7 +163,8 @@ export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions):
     // A directed chord group's value is the sum of its incoming AND outgoing
     // flows (see d3-chord's groupSums), i.e. the total through the node.
     onTooltip({
-      label: `${names.get(d.index)} (total)`,
+      // FEATURE (2026-07-07): mapped label via displayNames (was raw names).
+      label: `${displayNames.get(d.index)} (total)`,
       value: formatValue(d.value),
       x: event.clientX,
       y: event.clientY,
@@ -202,7 +217,10 @@ export function createViz(elem: SVGSVGElement | null, options: ChordVizOptions):
         .attr('text-anchor', (d) => (d.startAngle < Math.PI ? 'start' : 'end'))
         .attr('transform', (d) => (d.startAngle >= Math.PI ? 'rotate(180)' : null))
         // dont show if the "pie" is too small
-        .text((d) => (d.endAngle - d.startAngle > LABEL_COLLAPSE_ANGLE ? names.get(d.index) ?? '' : LABEL_COLLAPSE_TEXT))
+        // FEATURE (2026-07-07): mapped label via displayNames (was raw names).
+        .text((d) =>
+          d.endAngle - d.startAngle > LABEL_COLLAPSE_ANGLE ? displayNames.get(d.index) ?? '' : LABEL_COLLAPSE_TEXT
+        )
         .call(wrap, txtLen)
     )
     .call((g) =>

@@ -101,6 +101,67 @@ describe('createViz', () => {
     expect(reported.get('CERN (total)')).toBe('8');
   });
 
+  it('omits the unit suffix (no literal "undefined") when the value field has no unit', () => {
+    // The value field carries no display processor / unit, so the display
+    // result has an undefined suffix. The tooltip must not print "undefined".
+    const svg = buildSvg();
+    const onTooltip = jest.fn();
+    createViz(svg, vizOptions({ onTooltip }));
+
+    const arcs = svg.querySelectorAll(':scope > g:nth-of-type(2) > g > path');
+    arcs.forEach((arc) => {
+      arc.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 5, clientY: 6 }));
+    });
+    const values = onTooltip.mock.calls.map((c) => (c[0] as ChordTooltipData | null)?.value).filter(Boolean);
+    expect(values.length).toBeGreaterThan(0);
+    values.forEach((v) => expect(v).not.toContain('undefined'));
+  });
+
+  it('appends the unit suffix to tooltip values when the value field has a unit', () => {
+    const svg = buildSvg();
+    const onTooltip = jest.fn();
+    const prep = prepFor();
+    // Simulate a configured unit: Grafana attaches a display processor whose
+    // result carries the unit as a suffix.
+    prep.valueField.display = (v) => ({ text: String(v), numeric: Number(v), suffix: 'bps' });
+    createViz(svg, vizOptions({ prep, onTooltip }));
+
+    const arcs = svg.querySelectorAll(':scope > g:nth-of-type(2) > g > path');
+    arcs[0].dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 5, clientY: 6 }));
+    const payload: ChordTooltipData = onTooltip.mock.calls[onTooltip.mock.calls.length - 1][0];
+    expect(payload.value).toMatch(/\bbps$/);
+  });
+
+  it('shows value-mapped display names in arc labels and tooltip labels', () => {
+    const svg = buildSvg();
+    const onTooltip = jest.fn();
+    // Map raw endpoint names to friendly labels via the field display
+    // processors (how Grafana surfaces value mappings to the panel). The
+    // display processors must be attached before prepData runs, since that is
+    // where display names are resolved — matching Grafana's real order.
+    const frame = buildFrame([['LBL', 'ANL', 10]]);
+    const rename: Record<string, string> = { LBL: 'Berkeley', ANL: 'Argonne' };
+    const mapper = (v: unknown) => ({ text: rename[String(v)] ?? String(v), numeric: NaN });
+    frame.fields[0].display = mapper; // source
+    frame.fields[1].display = mapper; // target
+    const prep = prepData(frame, 'source', 'target', 'value');
+    if (!prep.ok) {
+      throw new Error(prep.reason);
+    }
+    createViz(svg, vizOptions({ prep, onTooltip }));
+
+    // Arc labels use the mapped names.
+    const labels = Array.from(svg.querySelectorAll('text')).map((t) => t.textContent);
+    expect(labels).toEqual(expect.arrayContaining(['Berkeley', 'Argonne']));
+    expect(labels).not.toEqual(expect.arrayContaining(['LBL', 'ANL']));
+
+    // Chord tooltip label uses the mapped names too.
+    const ribbon = svg.querySelector(':scope > g:first-of-type path')!;
+    ribbon.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 1, clientY: 2 }));
+    const payload: ChordTooltipData = onTooltip.mock.calls[onTooltip.mock.calls.length - 1][0];
+    expect(payload.label).toBe('Berkeley → Argonne');
+  });
+
   it('renders nothing when the panel is too small (radius < 180)', () => {
     const svg = buildSvg();
     createViz(svg, vizOptions({ height: 200 }));

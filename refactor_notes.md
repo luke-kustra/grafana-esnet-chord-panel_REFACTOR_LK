@@ -27,232 +27,8 @@ This document summarizes the changes made during the 2026-07-01 refactor of the 
 - `module.ts`: deduplicated three identical copy-pasted `getOptions` callbacks into one `listFieldNames` helper; fixed the Label Size slider missing its category; removed a stale JSDoc referencing "NetSageSankey" (copy-paste from a sibling plugin).
 - Deleted cruft: committed vim swap file (`.chord.js.swp`); `dist/` is no longer ignored-in-name-only (`.gitignore` fixed).
 
-## 5. Testing
 
-### Unit tests (Jest + React Testing Library, jsdom — no Grafana needed)
-
-Files: `tests/unit/` (see section 7 for the 2026-07-02 reorganization)
-Support files: `jest.config.js`, `tests/jest-setup.js` (jsdom polyfills), `tests/mocks/style.js`
-
-**`tests/unit/data.test.ts` — matrix builder (11 tests)**
-
-- builds `matrix[sourceIdx][targetIdx] = value` with an index→name lookup map
-- aggregates repeated source/target pairs
-- guesses the first three columns when no field names are configured
-- resolves fields configured by *display* name (e.g. `displayName` overrides)
-- returns a failure with a human-readable reason for each bad-input case:
-  configured field absent from the data, non-numeric value field, missing
-  frame, zero rows, null source/target values
-
-**`tests/unit/colors.test.ts` — color resolution (7 tests)**
-
-- classic-palette color assignment by matrix index, with wrap-around
-- chord colored by its source vs. target depending on the `colorBySource` option
-- fixed color mode, value-mapping overrides, and by-value gradient modes
-- palette fallback when the driving field is missing
-
-**`tests/unit/chord.test.ts` — d3 rendering (8 tests)**
-
-- renders one ribbon per data row, one arc/label/tick per node, palette fills
-- **no native `<title>` elements remain** (regression guard for the tooltip switch)
-- `pointermove` on a ribbon invokes the tooltip callback with the label in
-  **data direction** (`source → target`); `pointerout` invokes it with `null`
-- `pointermove` on an outer arc reports the node total (incoming + outgoing)
-- guard clauses: too-small panel (in either dimension) and an oversized Text
-  Length render nothing
-- re-rendering clears previous contents (no duplicated nodes)
-
-**`tests/unit/ChordPanel.test.tsx` — panel component (7 tests)**
-
-- shows the "Please set Source, Target and Value Field Options" message when field options are missing
-- shows the preparation failure reason (unknown field, non-numeric value field) as panel text
-- renders the chord SVG when options are set
-- **Grafana tooltip lifecycle**: hovering a chord renders the tooltip through a React `Portal` (asserted to be *outside* the panel SVG — i.e. Grafana's tooltip, not a native one); `pointerout` removes it; a data refresh mid-hover clears it
-- rules-of-hooks regression test: flipping between the configured and unconfigured branches re-renders without crashing (the pre-refactor component called hooks conditionally and could crash exactly here)
-
-**`tests/unit/module.test.ts` — plugin wiring (4 tests)**
-
-- exports a `PanelPlugin` wrapping `ChordPanel`
-- registers the expected options (`targetField`, `sourceField`, `valueField`, `colorBySource`, `txtLength`, `pointLength`, `labelSize`) with their defaults (order-independent assertions)
-- the shared `listFieldNames` loader lists field display names from the first frame only, and returns nothing without data
-
-**jsdom polyfills** (`tests/jest-setup.js`): `TextEncoder`/`TextDecoder` (needed by `react-dom/server` via `@grafana/ui`), `ResizeObserver` (used by `VizTooltipContainer`), `matchMedia`, and `SVGElement.getComputedTextLength` (used by the label word-wrapper).
-
-Run them:
-
-```bash
-npm test                             # all unit tests
-npx jest --watch                     # watch mode
-npx jest tests/unit/chord.test.ts    # a single suite
-```
-
-### End-to-end test (Playwright + @grafana/plugin-e2e — NO Docker)
-
-Files: `tests/e2e/chordPanel.spec.ts`, `playwright.config.ts`, `provisioning/datasources/testdata.yaml`
-
-**Strategy.** The tests run against a *locally installed* Grafana (no Docker). The `/api/ds/query` response is mocked with a fixed source/target/value frame (`panelEditPage.mockQueryDataResponse`), so the test doesn't depend on any datasource-editor UI internals and stays focused on this plugin: panel registration, the Display option editors, d3 rendering, and the Grafana tooltip.
-
-Two tests:
-
-1. **Unconfigured state** — selecting the ESnet Chord visualization without field options shows the configuration prompt.
-2. **Full render + tooltip** — sets Source/Target/Value via the panel's Display options, then asserts: 3 chord ribbons render, outer labels show node names, **zero native `<title>` elements exist**, hovering a ribbon shows Grafana's tooltip (`X → Y` text in a portal), and moving the pointer away hides it.
-
-**One-time setup:**
-
-```bash
-brew install grafana             # local Grafana, no Docker
-npx playwright install chromium  # browser for Playwright
-npm run build                    # produce dist/ (what Grafana loads)
-```
-
-**Start an isolated Grafana instance** (throwaway data dir on port 3333; does not touch any existing Grafana install or config):
-
-```bash
-E2E_HOME=/tmp/grafana-chord-e2e
-mkdir -p $E2E_HOME/data $E2E_HOME/logs $E2E_HOME/plugins \
-         $E2E_HOME/provisioning/{datasources,dashboards,plugins,alerting,notifiers}
-ln -sfn "$(pwd)/dist" $E2E_HOME/plugins/esnet-chord-panel
-cp provisioning/datasources/testdata.yaml $E2E_HOME/provisioning/datasources/
-
-GF_SERVER_HTTP_PORT=3333 \
-GF_PATHS_DATA=$E2E_HOME/data \
-GF_PATHS_LOGS=$E2E_HOME/logs \
-GF_PATHS_PLUGINS=$E2E_HOME/plugins \
-GF_PATHS_PROVISIONING=$E2E_HOME/provisioning \
-GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=esnet-chord-panel \
-grafana server --homepath /opt/homebrew/opt/grafana/share/grafana
-```
-
-(`allow_loading_unsigned_plugins` is required because local dev builds are unsigned. On Intel Macs the homepath is `/usr/local/opt/grafana/share/grafana`.)
-
-**Run the tests** (in a second terminal):
-
-```bash
-GRAFANA_URL=http://localhost:3333 npm run e2e
-npm run e2e:report    # open the HTML report
-```
-
-The `auth` project logs in automatically with Grafana's default `admin`/`admin` credentials and stores the session in `playwright/.auth/` (git-ignored).
-
-To run against an already-running Grafana instead, point `GRAFANA_URL` at it — it needs this plugin in its plugins directory (unsigned allowed) and the TestData datasource from `provisioning/datasources/testdata.yaml`.
-
-### Verified results (2026-07-01)
-
-- Unit: **21/21 passing** (`npm test`)
-- E2E: **3/3 passing** (auth setup + 2 specs) against a local Homebrew **Grafana 13.0.2** using the isolated-instance steps above — which also confirms `VizTooltipContainer` works at runtime on current Grafana
-- `npm run typecheck`, `npm run lint`, and `npm run build` all clean
-
-### Other checks
-
-```bash
-npm run typecheck   # tsc --noEmit
-npm run lint        # eslint over src/
-npm run build       # production bundle into dist/
-```
-
-## 6. Manual testing
-
-### Installing the plugin into a local (Homebrew) Grafana
-
-The visualization picker only lists panels that Grafana found in its plugins
-directory at startup, and unsigned dev builds must be explicitly allowlisted.
-For a Homebrew Grafana on Apple Silicon:
-
-```bash
-npm run build   # make sure dist/ is current
-
-# 1. Link the built plugin into Grafana's plugins directory
-#    (a symlink means rebuilds are picked up on the next restart;
-#     use `cp -r` instead if you prefer a frozen copy)
-ln -sfn "$(pwd)/dist" /opt/homebrew/var/lib/grafana/plugins/esnet-chord-panel
-
-# 2. Allow the unsigned plugin: in /opt/homebrew/etc/grafana/grafana.ini,
-#    under [plugins], add esnet-chord-panel to the comma-separated list:
-#    allow_loading_unsigned_plugins = ...,esnet-chord-panel
-
-# 3. Restart Grafana so it rescans plugins
-brew services restart grafana
-```
-
-Verify it loaded: `curl -s -u admin:<password> http://localhost:3000/api/plugins/esnet-chord-panel/settings`
-or check the Grafana log for `Plugin is unsigned` + `id=esnet-chord-panel`
-(warn is fine — it means the allowlist worked).
-
-Then: dashboard → Add panel → visualization picker → search **"ESnet Chord"**.
-
-### Sample datasets
-
-Use the **TestData** datasource → Scenario: **CSV Content**, and paste one of
-the datasets below. Reminder: the panel must be at least ~380px in BOTH
-dimensions or the chord intentionally renders blank (the diagram sizes to
-the shorter panel dimension; `MIN_RADIUS` guard, see section 7).
-
-**Dataset 1 — quick smoke test (3 nodes):**
-
-```csv
-source,target,value
-LBL,ANL,10
-ANL,CERN,5
-LBL,CERN,3
-```
-
-**Dataset 2 — realistic ESnet-style traffic (7 sites, tests aggregation):**
-
-```csv
-source,target,value
-LBL,ANL,42.5
-LBL,ORNL,18.2
-ANL,CERN,35.0
-CERN,LBL,27.8
-ORNL,BNL,12.4
-BNL,FNAL,22.1
-FNAL,CERN,31.6
-SLAC,LBL,9.3
-ANL,SLAC,14.7
-CERN,BNL,25.9
-LBL,ANL,7.5
-BNL,LBL,16.0
-ORNL,CERN,11.2
-FNAL,ANL,8.8
-SLAC,ORNL,6.4
-CERN,FNAL,19.5
-```
-
-`LBL,ANL` appears twice (42.5 + 7.5) — its chord should show the aggregated
-value **50** in the tooltip.
-
-**Dataset 3 — edge cases (long labels + tiny slices):**
-
-```csv
-source,target,value
-Lawrence Berkeley National Laboratory,Argonne National Laboratory,500
-Argonne National Laboratory,European Organization for Nuclear Research,2
-Oak Ridge,Lawrence Berkeley National Laboratory,1
-```
-
-The long names exercise the outer-label word-wrapper; the tiny values should
-collapse their arc labels to "`. . .`".
-
-### Manual test checklist
-
-1. Panel options → **Display** → set Source Field = `source`, Target Field =
-   `target`, Value Field = `value`. Before configuring them you should see
-   the "Please set Source, Target and Value Field Options" prompt.
-2. **Hover chords and outer arcs** — tooltips should be Grafana-styled
-   (theme-aware, following the pointer): `X → Y : value` for chords, node
-   totals for arcs. They must vanish on mouse-out and on data refresh.
-3. **Standard options → Unit** — e.g. Data rate → Gbit/s; tooltip values
-   should pick up the suffix.
-4. **Standard options → Color scheme** — try a "by value" gradient (e.g.
-   Green-Yellow-Red) for value-based coloring; with the classic palette,
-   flip **Display → Color By** between Source and Target.
-5. Resize the panel below ~380px in either dimension — it should blank out
-   and reappear when enlarged.
-6. Configure a Source/Target/Value field that doesn't exist in the data, or
-   a non-numeric Value field — the panel should show a message explaining
-   the problem instead of rendering blank.
-
-## 7. 2026-07-02 follow-up refactor
+## 5. 2026-07-02 follow-up refactor
 
 A second pass over the codebase. Rendering output is unchanged for
 well-formed data and default options. Changes:
@@ -347,3 +123,102 @@ tooltip label/value pairing on hover.
 - E2E: **3/3 passing** against a local Homebrew **Grafana 13.0.2** using the
   isolated-instance steps in section 5
 - `npm run typecheck`, `npm run lint`, and `npm run build` all clean
+
+
+### Sample datasets
+
+Use the **TestData** datasource → Scenario: **CSV Content**, and paste one of
+the datasets below. Reminder: the panel must be at least ~380px in BOTH
+dimensions or the chord intentionally renders blank (the diagram sizes to
+the shorter panel dimension; `MIN_RADIUS` guard, see section 7).
+
+**Dataset 1 — quick smoke test (3 nodes):**
+
+```csv
+source,target,value
+LBL,ANL,10
+ANL,CERN,5
+LBL,CERN,3
+```
+
+**Dataset 2 — realistic ESnet-style traffic (7 sites, tests aggregation):**
+
+```csv
+source,target,value
+LBL,ANL,42.5
+LBL,ORNL,18.2
+ANL,CERN,35.0
+CERN,LBL,27.8
+ORNL,BNL,12.4
+BNL,FNAL,22.1
+FNAL,CERN,31.6
+SLAC,LBL,9.3
+ANL,SLAC,14.7
+CERN,BNL,25.9
+LBL,ANL,7.5
+BNL,LBL,16.0
+ORNL,CERN,11.2
+FNAL,ANL,8.8
+SLAC,ORNL,6.4
+CERN,FNAL,19.5
+```
+
+`LBL,ANL` appears twice (42.5 + 7.5) — its chord should show the aggregated
+value **50** in the tooltip.
+
+**Dataset 3 — edge cases (long labels + tiny slices):**
+
+```csv
+source,target,value
+Lawrence Berkeley National Laboratory,Argonne National Laboratory,500
+Argonne National Laboratory,European Organization for Nuclear Research,2
+Oak Ridge,Lawrence Berkeley National Laboratory,1
+```
+
+The long names exercise the outer-label word-wrapper; the tiny values should
+collapse their arc labels to "`. . .`".
+
+## 6. 2026-07-07 feature/bugfix pass
+
+Two tracked items: outer-ring tooltip unit, and Value Mapping support.
+
+### Value Mapping support for node labels (feature)
+
+- **Before:** Grafana value mappings were honored for arc/ribbon **colors**
+  only (`src/colors.ts`). Node **names** — the outer arc labels and both
+  tooltip labels — came straight from the raw `String(value)` in `prepData`,
+  so a mapping like `LBL → Berkeley` never showed in the labels.
+- **After:** `prepData` (`src/data.ts`) now also returns `displayNames`
+  (matrix index → mapped/formatted label), computed by running each raw node
+  value through its source/target field's Grafana display processor
+  (`displayNameOf()`). `src/chord.ts` renders `displayNames` for the arc
+  labels and the chord/group tooltip labels. Node **identity/aggregation is
+  unchanged** — it still keys on the raw value (`names`), so `colors.ts`'s
+  mapping/color lookups keep working; only the user-facing text changed.
+- **Known limits (by design):** identity stays raw, so two distinct raw
+  values that map to the same text remain separate nodes; a node seen as both
+  source and target uses the first field's mapping (first-encounter wins); a
+  numeric source/target field also gets unit/decimal formatting on its label
+  (rare — source/target are almost always strings).
+
+### Outer-ring tooltip "unit is undefined" (bug — already fixed by the refactor)
+
+- The original `chord.js` printed `${disp.suffix}` unguarded on the outer arc
+  `<title>`, showing the literal `undefined` when no unit was configured. The
+  refactor already routes both inner and outer tooltips through the shared,
+  suffix-guarded `formatValue` in `src/chord.ts`
+  (`disp.suffix ? \` ${disp.suffix}\` : ''`), so it no longer occurs. This
+  pass added regression tests and a clarifying comment to lock it in.
+
+### Tests / verification (2026-07-07)
+
+- Unit: **42/42 passing** (`npm test`) — added `displayNames` cases to
+  `tests/unit/data.test.ts` and mapped-label + unit-suffix (no-`undefined`)
+  cases to `tests/unit/chord.test.ts`.
+- `npm run typecheck`, `npm run lint`, `npm run build` all clean; `dist`
+  rebuilt.
+- Manual: add a Value mapping on the Source field (e.g. `LBL → Berkeley`) and
+  confirm it shows in the arc label and both tooltips; hover an outer arc with
+  no Unit set and confirm no trailing `undefined`, then set a Unit and confirm
+  the suffix appears.
+

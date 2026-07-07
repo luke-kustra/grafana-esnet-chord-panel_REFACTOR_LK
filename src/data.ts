@@ -10,6 +10,14 @@
 //  - The success value carries the resolved Field objects, so downstream
 //    code (color resolution, value formatting) no longer re-scans
 //    frame.fields by name.
+//
+// FEATURE (2026-07-07): Value Mapping support for node labels. prepData now
+// also returns `displayNames` (matrix index -> mapped/formatted label),
+// computed by running each raw node value through its source/target field's
+// Grafana display processor via displayNameOf(). Node identity/aggregation is
+// unchanged (still keyed on the raw value in `names`), so colors.ts's
+// mapping/color lookups keep working; only the user-facing labels in chord.ts
+// switch to `displayNames`. See displayNameOf() and the first pass below.
 import { DataFrame, Field, getFieldDisplayName } from '@grafana/data';
 
 export interface PrepSuccess {
@@ -17,8 +25,13 @@ export interface PrepSuccess {
   /** matrix[sourceIdx][targetIdx] = aggregated value (d3.chordDirected reads
    *  matrix[i][j] as the flow from node i to node j) */
   matrix: number[][];
-  /** matrix index -> node name */
+  /** matrix index -> raw node name (node identity; drives matrix indexing
+   *  and value-mapping/color lookup in colors.ts) */
   names: Map<number, string>;
+  /** matrix index -> display node name (the raw value run through the
+   *  source/target field's display processor, so value mappings relabel the
+   *  arc labels and tooltip labels). Falls back to the raw name. */
+  displayNames: Map<number, string>;
   sourceField: Field;
   targetField: Field;
   valueField: Field;
@@ -33,6 +46,17 @@ export interface PrepFailure {
 export type PrepResult = PrepSuccess | PrepFailure;
 
 const fail = (reason: string): PrepFailure => ({ ok: false, reason });
+
+/**
+ * Resolve the user-facing label for a raw node value by running it through the
+ * field's Grafana display processor (which applies value mappings, and any
+ * unit/decimal formatting). Falls back to the raw string when the field has no
+ * display processor. The raw value is passed through unchanged so numeric value
+ * mappings match on the original value, not its stringified form.
+ */
+function displayNameOf(field: Field, raw: unknown): string {
+  return field.display?.(raw)?.text ?? String(raw);
+}
 
 /**
  * Resolve a configured field name against a frame. The option editors list
@@ -82,21 +106,30 @@ export function prepData(frame: DataFrame | undefined, src?: string, target?: st
     return fail('Query returned no rows');
   }
 
-  // First pass: collect the distinct node names in row order.
+  // First pass: collect the distinct nodes in row order. Node identity is the
+  // raw stringified value (so a source "A" and a target "A" are the same node);
+  // the display name is derived from the field the node was first seen on, so
+  // value mappings on the source or target field relabel it.
   const index = new Map<string, number>();
   const names = new Map<number, string>();
+  const displayNames = new Map<number, string>();
+  const addNode = (raw: unknown, field: Field) => {
+    const key = String(raw);
+    if (!index.has(key)) {
+      const idx = index.size;
+      index.set(key, idx);
+      names.set(idx, key);
+      displayNames.set(idx, displayNameOf(field, raw));
+    }
+  };
   for (let i = 0; i < rowCount; i++) {
     const s = sourceField.values[i];
     const t = targetField.values[i];
     if (s === null || s === undefined || t === null || t === undefined) {
       return fail('Source or target values are missing in the data');
     }
-    for (const name of [String(s), String(t)]) {
-      if (!index.has(name)) {
-        names.set(index.size, name);
-        index.set(name, index.size);
-      }
-    }
+    addNode(s, sourceField);
+    addNode(t, targetField);
   }
 
   // Second pass: aggregate values into the matrix.
@@ -111,5 +144,5 @@ export function prepData(frame: DataFrame | undefined, src?: string, target?: st
     matrix[s][t] += v;
   }
 
-  return { ok: true, matrix, names, sourceField, targetField, valueField };
+  return { ok: true, matrix, names, displayNames, sourceField, targetField, valueField };
 }

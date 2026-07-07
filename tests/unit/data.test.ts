@@ -44,6 +44,33 @@ describe('prepData', () => {
     expect(result.ok && result.matrix[0][1]).toBe(7);
   });
 
+  it('relabels node names via the source/target field display processor (value mappings)', () => {
+    const frame = buildFrame([['1', '2', 5]]);
+    const [sourceField, targetField] = frame.fields;
+    // A value mapping is surfaced to the panel as a field display processor.
+    sourceField.display = (v) => ({ text: v === '1' ? 'Server A' : String(v), numeric: NaN });
+    targetField.display = (v) => ({ text: v === '2' ? 'Server B' : String(v), numeric: NaN });
+
+    const result = prepData(frame, 'source', 'target', 'value');
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    // Identity/raw names are preserved (colors.ts and the matrix key on these).
+    expect(result.names.get(0)).toBe('1');
+    expect(result.names.get(1)).toBe('2');
+    // Display names carry the mapped text from the field each node was first
+    // seen on (source for node 0, target for node 1).
+    expect(result.displayNames.get(0)).toBe('Server A');
+    expect(result.displayNames.get(1)).toBe('Server B');
+  });
+
+  it('falls back to the raw name for display when the field has no display processor', () => {
+    const result = prepData(buildFrame([['A', 'B', 1]]), 'source', 'target', 'value');
+    expect(result.ok && result.displayNames.get(0)).toBe('A');
+    expect(result.ok && result.displayNames.get(1)).toBe('B');
+  });
+
   it('returns the resolved fields on success', () => {
     const result = prepData(buildFrame(), 'source', 'target', 'value');
     expect(result.ok && result.sourceField.name).toBe('source');
